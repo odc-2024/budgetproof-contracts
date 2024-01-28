@@ -1,115 +1,102 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.9;
 
+struct BudgetAllocationView {uint256 id; uint256 state; string receiverUsername; address receiverAddress;
+    uint256 amount; string volunteerUsername; address volunteerAddress; }
+
 contract BudgetAllocation {
   /* stores state of allocation (in process, allocated) */
   uint256 public state = 0;
   /* stores allocation name */
-  string public name;
+  string public receiverUsername;
+  /* stores allocation name */
+  address public receiverAddress;
   /* stores allocation amount */
   uint256 public amount;
-  /* stores receiver hash */
-  address public receiverAddress;
-
-  constructor(string memory name_, uint256 amount_, address receiverAddress_) {
-    name = name_;
-    amount = amount_;
-    receiverAddress = receiverAddress_;
-  }
-}
-
-contract BudgetVolunteer {
-  string public name;
-  uint256 public lockAmount = 0;
+  /* stores volunteer address */
   address public volunteerAddress;
+  /* stores volunteer username */
+  string public volunteerUsername;
 
-  mapping(uint256 => BudgetAllocation) public allocations;
-  uint256[] public allocationIds;
-  uint256 public allocationCounter = 0;
-
-  constructor(string memory name_, uint256 lockAmount_, address volunteerAddress_) {
-    name = name_;
-    lockAmount = lockAmount_;
+  constructor(string memory receiverUsername_, address receiverAddress_, uint256 amount_,
+      address volunteerAddress_, string memory volunteerUsername_) {
+    receiverUsername = receiverUsername_;
+    receiverAddress = receiverAddress_;
+    amount = amount_;
     volunteerAddress = volunteerAddress_;
+    volunteerUsername = volunteerUsername_;
   }
 
-  function createAllocation(string memory name_, uint256 amount_, address receiverAddress_) public returns(uint256) {
-    if (amount_ > lockAmount)
-      revert("amount exceeds the remaining amount");
-    /* deploy budget allocation contract */
-    BudgetAllocation allocation = new BudgetAllocation(name_, amount_, receiverAddress_);
+  function confirmAllocation() public {
+    require(state == 0, "Allocation is already confirmed");
+    require(msg.sender != receiverAddress, "Allocation is not for you");
 
-    uint256 allocationId = allocationCounter;
-
-    allocations[allocationId] = allocation;
-
-    lockAmount -= amount_;
-
-    return 0;
-  }
-
-  function confirmAllocation(uint256 allocationId_, uint8 v, bytes32 r, bytes32 s) public {
-    if (address(allocations[allocationId_]) != address(0))
-      revert("Allocation does not exist");
-
-    if (allocations[allocationId_].receiverAddress() != msg.sender)
-      revert("Allocation is not for this address");
+    state = 1;
   }
 }
 
 contract Budget {
   /* stores name of budget (human readable?) */
   string public name;
+  /* stores amount of budget */
+  uint256 public amount;
   /* stores remaining amount of budget */
   uint256 public remainingAmount;
-  /* stores volunteers */
-  mapping(uint256 => BudgetVolunteer) public volunteers;
-  /* stores volunteer ids */
-  uint256[] public volunteerIds;
-  /* stores free volunteer id */
-  uint256 public volunteerCounter = 0;
+  /* stores unit name */
+  string public unit;
+  /* stores allocations */
+  mapping(uint256 => BudgetAllocation) public allocations;
+  /* stores allocation ids */
+  uint256[] public allocationIds;
+  /* stores free allocation id */
+  uint256 public allocationCounter = 0;
 
-  constructor(string memory name_, uint256 amount_) {
+  constructor(string memory name_, uint256 amount_, string memory unit_) {
     name = name_;
     remainingAmount = amount_;
+    amount = amount_;
+    unit = unit_;
   }
 
-  function createVolunteer(string memory name_, uint256 lockAmount_, address volunteerAddress_) public returns(uint256) {
-    /* deploy budget volunteer contract */
-    BudgetVolunteer volunteer = new BudgetVolunteer(name_, lockAmount_, volunteerAddress_);
-    /* get free volunteer id */
-    uint256 volunteerId = volunteerCounter;
-    /* store volunteer with volunteer id */
-    volunteers[volunteerId] = volunteer;
-    /* store volunteer id */
-    volunteerIds.push(volunteerId);
-    /* increment free volunteer id */
-    volunteerCounter++;
+  function createAllocation(string memory receiverUsername_, address receiverAddress_, uint256 amount_,
+      address volunteerAddress_, string memory volunteerUsername_) public {
 
-    return volunteerId;
+    BudgetAllocation allocation = new BudgetAllocation(receiverUsername_, receiverAddress_,
+        amount_, volunteerAddress_, volunteerUsername_);
+
+    uint256 allocationId = allocationCounter;
+
+    allocations[allocationId] = allocation;
+
+    remainingAmount -= amount_;
+
+    allocationCounter++;
   }
 
-  function createAllocation(uint256 volunteerId_, string memory name_, uint256 amount_, address receiverAddress_) public {
-    if (address(volunteers[volunteerId_]) == address(0))
-      revert("Volunteer does not exist");
+  function confirmAllocation(uint256 allocationId_) public {
+    require(address(allocations[allocationId_]) != address(0), "Allocation does not exist");
+    allocations[allocationId_].confirmAllocation();
   }
 
-  function confirmAllocation(uint256 volunteerId_, uint256 allocationId_, uint8 v, bytes32 r, bytes32 s) public {
-    if (address(volunteers[volunteerId_]) == address(0))
-      revert("Volunteer does not exist");
+  function getAllocations() public view returns (BudgetAllocationView[] memory) {
+    BudgetAllocationView[] memory views = new BudgetAllocationView[](allocationCounter);
 
-    volunteers[volunteerId_].confirmAllocation(allocationId_, v, r, s);
+    for (uint256 i = 0; i < allocationCounter; i++)
+      views[i] = BudgetAllocationView(i, allocations[i].state(), allocations[i].receiverUsername(),
+          allocations[i].receiverAddress(), allocations[i].amount(), allocations[i].volunteerUsername(),
+          allocations[i].volunteerAddress());
+
+    return views;
   }
 }
 
-// (Ck + Vk) + Bk = proof?
 contract BudgetProof {
-  uint256 private budgetId = 0;
+  uint256 public budgetCounter = 0;
   mapping(uint256 => Budget) public budgets;
   uint256[] public budgetIds;
 
   /* budget created event */
-  event BudgetCreated(uint256 indexed budgetId, string name, uint256 amount);
+  event BudgetCreated(uint256 indexed budgetId, string name, uint256 amount, string unit);
 
   /* budget allocation event */
   event BudgetAllocated(uint256 indexed budgetId, string name, uint256 amount,
@@ -119,44 +106,66 @@ contract BudgetProof {
     /* void */
   }
 
-  function createBudget(string memory name_, uint256 amount_) public returns (uint256) {
+  receive() payable external {}
+
+  function createCampaign(string memory name_, uint256 amount_, string memory unit_) public {
+    uint256 budgetId = budgetCounter;
+
     /* deploy a new budget contract and store it with id */
-    budgets[budgetId] = new Budget(name_, amount_);
+    budgets[budgetId] = new Budget(name_, amount_, unit_);
 
     /* store budget's id */
     budgetIds.push(budgetId);
 
     /* emit BudgetCreated event to store the action in logs */
-    emit BudgetCreated(budgetId, name_, amount_);
+    emit BudgetCreated(budgetId, name_, amount_, unit_);
 
-    return budgetId;
+    budgetCounter++;
   }
 
-  function createVolunteer(uint256 budgetId_, string memory name_, uint256 lockAmount_, address address_) public returns(uint256) {
+  function createAllocation(uint256 budgetId_, string memory receiverUsername_, address receiverAddress_, uint256 amount_,
+      address volunteerAddress_, string memory volunteerUsername_) public {
     /* check if budget exists, revert otherwise */
     if (address(budgets[budgetId_]) == address(0))
       revert("Budget does not exist");
 
-    /* create a new volunter for given budget */
-    uint256 volunteerId = budgets[budgetId_].createVolunteer(name_, lockAmount_, address_);
-
-    return volunteerId;
+    budgets[budgetId_].createAllocation(receiverUsername_, receiverAddress_, amount_, volunteerAddress_, volunteerUsername_);
   }
 
-  function createAllocation(uint256 budgetId_, uint256 volunteerId_, string memory name_, uint256 amount_, address receiverAddress_) public {
-    /* check if budget exists, revert otherwise */
+  function confirmAllocation(uint256 budgetId_, uint256 allocationId_) public {
     if (address(budgets[budgetId_]) == address(0))
       revert("Budget does not exist");
 
-    budgets[budgetId_].createAllocation(volunteerId_, name_, amount_, receiverAddress_);
-
-    emit BudgetAllocated(budgetId_, name_, amount_, receiverAddress_, block.timestamp);
+    budgets[budgetId_].confirmAllocation(allocationId_);
   }
 
-  function confirmAllocation(uint256 budgetId_, uint256 volunteerId_, uint256 allocationId_, uint8 v, bytes32 r, bytes32 s) public {
+  struct BudgetView {uint256 id; string name; uint256 amount; string unit; uint256 remainingAmount; address contractAddress;}
+
+  function getBudgets() public view returns(BudgetView[] memory) {
+    BudgetView[] memory views = new BudgetView[](budgetCounter);
+
+    for (uint256 i = 0; i < budgetCounter; i++)
+      views[i] = BudgetView(i, budgets[i].name(), budgets[i].amount(), budgets[i].unit(),
+          budgets[i].remainingAmount(), address(budgets[i]));
+
+    return views;
+  }
+
+  function getBudget(uint256 budgetId_) public view returns(BudgetView memory) {
     if (address(budgets[budgetId_]) == address(0))
       revert("Budget does not exist");
 
-    budgets[budgetId_].confirmAllocation(volunteerId_, allocationId_, v, r, s);
+    Budget budget = budgets[budgetId_];
+    BudgetView memory budgetView = BudgetView(budgetId_, budget.name(), budget.amount(),
+        budget.unit(), budget.remainingAmount(), address(budget));
+
+    return budgetView;
+  }
+
+  function getAllocations(uint256 budgetId_) public view returns(BudgetAllocationView[] memory) {
+    if (address(budgets[budgetId_]) == address(0))
+      revert("Budget does not exist");
+
+    return budgets[budgetId_].getAllocations();
   }
 }
